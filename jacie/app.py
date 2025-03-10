@@ -4,7 +4,8 @@ import os
 import asyncio
 import base64
 import tempfile
-from langchain_community.vectorstores import FAISS
+import chromadb
+from langchain_chroma import Chroma
 from langchain_google_vertexai import VertexAIEmbeddings, ChatVertexAI
 from langchain_core.messages import HumanMessage
 from langchain.memory import ConversationBufferMemory
@@ -12,6 +13,10 @@ from langchain_core.output_parsers import JsonOutputParser
 from fpdf import FPDF
 import functools
 import time
+from pyinstrument import Profiler
+
+profiler = Profiler()
+profiler.start()
 
 # --- Streamlit UI ---
 st.set_page_config(
@@ -50,13 +55,22 @@ except Exception as e:
     st.error(f"⚠️ Error setting up credentials: {str(e)}")
     st.stop()
 
-# --- Load FAISS Vector Store ---
+# --- Load Vector Store ---
 try:
     if not os.path.exists("vector_store"):
         st.error("🚫 Vector store not found. Please ensure it is initialized.")
         st.stop()
     embeddings = VertexAIEmbeddings(model="text-embedding-004")
-    vector_store = FAISS.load_local("vector_store", embeddings, allow_dangerous_deserialization=True)
+    document_store = Chroma(
+        client=chromadb.PersistentClient(path="./chroma_db"),
+        collection_name="company_docs",
+        embedding_function=embeddings
+    )
+    company_name_store = Chroma(
+        client=chromadb.PersistentClient(path="./chroma_db"),
+        collection_name="company_names",
+        embedding_function=embeddings
+    )
 except Exception as e:
     st.error(f"⚠️ Error loading vector store: {str(e)}")
     st.stop()
@@ -79,16 +93,30 @@ def encode_image(image_path):
         st.error(f"⚠️ Error encoding image {image_path}: {str(e)}")
         return None
 
-# --- FAISS Search Function ---
+# --- Vector Store Search Function ---
 num_images = st.sidebar.slider("Number of images to analyze", 1, 10, 3)  # Default is 3
+DEFAULT_COMPANY_NAME = st.secrets["DEFAULT_COMPANY_NAME"]
+def get_company_name(query):
+    results = company_name_store.similarity_search(query, k=1)
+    company_name = results[0].metadata["short_name"]
+    st.sidebar.write(f"Company Name: {company_name}")
+    return company_name
 
-def search_faiss(query, k=num_images):
-    results = vector_store.similarity_search(query, k=k)
-    retrieved_images = [doc.metadata.get("image") for doc in results if doc.metadata.get("image")]
+def get_document_images(query, k=num_images, company_name=DEFAULT_COMPANY_NAME):
+    results = document_store.similarity_search(query, k=k, filter={"company_name": company_name})
+    retrieved_images = [
+        {
+            "image": doc.metadata.get("image"),
+            "year": doc.metadata.get("year")
+        } for doc in results if doc.metadata.get("image")
+    ]
+    retrieved_images.sort(key=lambda x: x["year"], reverse=True)
     
-    if not retrieved_images:
+    img_paths = [img["image"] for img in retrieved_images]
+    
+    if not img_paths:
         st.info("ℹ️ No matching documents found. Try refining your query or uploading new financial documents.")
-    return retrieved_images
+    return img_paths
 
 # --- Image Processing Prompt ---
 IMAGE_PROCESSING_PROMPT = """
@@ -159,7 +187,8 @@ async def process_pdf_image(image_path, query):
 # --- Async Function to Process Multiple Images ---
 async def analyze_pdf_images(query):
     """Retrieve and process relevant images with the user query."""
-    retrieved_images = search_faiss(query)
+    company_name = get_company_name(query)
+    retrieved_images = get_document_images(query, company_name=company_name)
     if not retrieved_images:
         st.info("ℹ️ No matching documents found. Try refining your query or uploading new financial documents.")
         return []
@@ -219,7 +248,7 @@ async def enhance_query_with_memory(user_query):
     # Retrieve chat history from memory
     chat_history = st.session_state.memory.load_memory_variables({})
     # Create a message with the user's query and chat history
-    message = HumanMessage(content=f"User Query: {user_query}\nChat History: {chat_history}")
+    message = HumanMessage(content=f"Optimize the user query for RAG consistency with the chat history: \nUser Query: {user_query}\nChat History: {chat_history}")
     # Use an LLM to enhance the query
     enhanced_query = await summarization_llm.ainvoke([message])
     return enhanced_query.content if enhanced_query and enhanced_query.content else user_query
@@ -237,6 +266,7 @@ for message in st.session_state.messages:
 async def handle_user_query(user_query):
     # Enhance the query using chat history
     enhanced_query = await enhance_query_with_memory(user_query)
+    st.sidebar.write(f"Enhanced Query: {enhanced_query}")
 
     # Process the enhanced query
     st.write("🔍 Searching for relevant document images...")
@@ -349,3 +379,6 @@ if 'pdf_analysis_results' in st.session_state:
         st.sidebar.download_button(label="Download Report as PDF", data=pdf_file, file_name="report.pdf", mime="application/pdf")
 else:
     st.sidebar.info("No analysis results available to download.")
+
+profiler.stop()
+print(profiler.output_text(unicode=True, color=True))
