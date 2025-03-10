@@ -13,6 +13,10 @@ from langchain_core.output_parsers import JsonOutputParser
 from fpdf import FPDF
 import functools
 import time
+from pyinstrument import Profiler
+
+profiler = Profiler()
+profiler.start()
 
 # --- Streamlit UI ---
 st.set_page_config(
@@ -375,3 +379,6 @@ if 'pdf_analysis_results' in st.session_state:
         st.sidebar.download_button(label="Download Report as PDF", data=pdf_file, file_name="report.pdf", mime="application/pdf")
 else:
     st.sidebar.info("No analysis results available to download.")
+
+profiler.stop()
+print(profiler.output_text(unicode=True, color=True))

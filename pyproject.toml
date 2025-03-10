@@ -24,6 +24,7 @@ google-cloud-aiplatform = "^1.81.0"
 fpdf = "^1.7.2"
 langchain-chroma = "^0.2.2"
 chromadb = "^0.6.3"
+pyinstrument = "^5.0.1"
 
 
 [tool.poetry.group.dev.dependencies]
